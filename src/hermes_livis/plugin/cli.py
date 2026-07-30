@@ -180,6 +180,22 @@ def cmd_import_openclaw(*, out: Printer = print) -> int:
     return 0
 
 
+def cmd_probe(*, timeout: float = 20.0, out: Printer = print) -> int:
+    """连一次真实中继、发握手、等 ``connected``，然后立刻断开。
+
+    把「理想是否接受这个客户端」从凭据 / 绑定 / agent / 授权等变量里孤立出来。
+    **运行前先停掉 hermes gateway** —— 同一 agent_id 只能有一条活跃连接。
+    """
+    import asyncio
+
+    from .probe import format_result, run_probe
+
+    result = asyncio.run(run_probe(timeout=timeout))
+    for line in format_result(result):
+        out(line)
+    return 0 if result.ok else 1
+
+
 def cmd_reset_agent_id(*, out: Printer = print) -> int:
     creds = LivisCredentials()
     fresh = creds.reset_agent_id()
@@ -236,6 +252,13 @@ def build_subcommands_into(subs: Any) -> None:
     status = subs.add_parser("status", help="查看凭据与投递状态（只读）")
     status.add_argument("--json", action="store_true", dest="as_json")
 
+    probe = subs.add_parser(
+        "probe", help="连一次真实中继验证握手是否被接受（先停掉 gateway）"
+    )
+    probe.add_argument(
+        "--timeout", type=float, default=20.0, help="等待 connected 的秒数（默认 20）"
+    )
+
     subs.add_parser("import-openclaw", help="从 ~/.openclaw/ 导入已有凭据")
     subs.add_parser("reset-agent-id", help="重置 Agent ID（需在 APP 里重新绑定）")
 
@@ -254,6 +277,8 @@ def run_subcommand(args: argparse.Namespace, *, out: Printer = print) -> int:
             show_browser_url=bool(getattr(args, "show_browser_url", False)),
             out=out,
         )
+    if command == "probe":
+        return cmd_probe(timeout=float(getattr(args, "timeout", 20.0)), out=out)
     if command == "import-openclaw":
         return cmd_import_openclaw(out=out)
     if command == "reset-agent-id":
@@ -295,6 +320,7 @@ __all__ = [
     "cmd_import_openclaw",
     "cmd_login",
     "cmd_logout",
+    "cmd_probe",
     "cmd_reset_agent_id",
     "cmd_status",
     "dispatch",

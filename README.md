@@ -53,6 +53,7 @@ hermes-livis import-openclaw      # 搬 ~/.openclaw/ 的 token / agent_id / devi
 | `hermes-livis login [--force] [--open-browser]` | OAuth2 设备码登录 |
 | `hermes-livis logout [--local-only] [--show-browser-url]` | 在 IDaaS 撤销 refresh_token 并清本地 |
 | `hermes-livis status [--json]` | 凭据与待投递状态（只读，不生成 agent_id） |
+| `hermes-livis probe [--timeout N]` | **连一次真实中继验证握手是否被接受**（先停掉 gateway） |
 | `hermes-livis import-openclaw` | 从 `~/.openclaw/` 导入凭据 |
 | `hermes-livis reset-agent-id` | 重置 Agent ID（需在 APP 里重新绑定） |
 
@@ -185,8 +186,8 @@ ruff check .
 
 * **理想是否接受非官方客户端** —— 端点、`client_id`、握手的 `client: "openclaw"`
   标签都沿用官方值以降低被拒概率，但服务端是否校验客户端身份**只能真连一次才知道**。
-  日志里出现 `中继已确认连接` 即通过；握手后立刻收到关闭码（尤其 `1008`）或 401
-  则是被拒。
+  用 `hermes-livis probe` 单独验证这一点（它把这个未知从凭据 / 绑定 / agent /
+  授权等变量里孤立出来，并把 1008、401、干净关闭等失败翻译成可操作的判词）。
 * **协议漂移** —— 私有协议，理想改版需要人工跟。URL 上有 `protocol_version=1`。
 * **env 注入 refresh_token** —— 服务端轮换后失效，长期运行请用文件存储。
 

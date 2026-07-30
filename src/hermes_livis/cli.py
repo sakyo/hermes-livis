@@ -135,7 +135,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if command in {
-            "login", "logout", "status", "import-openclaw", "reset-agent-id",
+            "login", "logout", "status", "probe",
+            "import-openclaw", "reset-agent-id",
         }:
             args.livis_command = command
             return plugin_cli.run_subcommand(args)
