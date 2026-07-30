@@ -45,8 +45,8 @@ dev = [
 hermes-livis = "hermes_livis.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/yangzhongwei/hermes-livis"
-Issues = "https://github.com/yangzhongwei/hermes-livis/issues"
+Homepage = "https://github.com/sakyo/hermes-livis"
+Issues = "https://github.com/sakyo/hermes-livis/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hermes_livis"]
