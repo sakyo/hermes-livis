@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass, field
+from typing import Any
 
 from . import protocol
 from .auth import LivisAuthError, LivisCredentials
@@ -37,7 +38,75 @@ class ProbeResult:
         self.steps.append((name, ok, detail))
 
 
-async def run_probe(*, timeout: float = 20.0) -> ProbeResult:
+async def _hold_connection(
+    ws: Any,
+    result: ProbeResult,
+    agent_id: str,
+    device_id: str,
+    seconds: float,
+) -> None:
+    """握手成功后保持连接一段时间，让你能在理想 APP 里看到「在线」。
+
+    APP 里的在线状态 = 中继上有没有一条活着的连接。默认的探针连完就断，APP
+    自然还是离线；这个模式专门用来把「连接能不能建立」和「APP 是否显示在线」
+    分开验证，而不必启动整个网关。
+
+    期间照常发心跳（30s 一次），行为与适配器一致。
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    next_heartbeat = loop.time() + 30.0
+    inbound = 0
+
+    while loop.time() < deadline:
+        try:
+            raw = await asyncio.wait_for(
+                ws.recv(), timeout=max(0.1, min(next_heartbeat, deadline) - loop.time())
+            )
+            inbound += 1
+            with contextlib.suppress(protocol.ProtocolError):
+                frame = protocol.parse_frame(raw)
+                # 保持模式下不处理业务帧，只记录 —— 探针不该替网关回结果。
+                if frame.get("type") == "send_message":
+                    result.step(
+                        "收到请求",
+                        True,
+                        "眼镜发来了消息（保持模式不作答，请改用 gateway）",
+                    )
+        except asyncio.TimeoutError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            result.step("保持连接", False, f"中途断开: {str(exc)[:160]}")
+            result.ok = False
+            result.verdict = (
+                "⚠️ 握手成功但连接没保持住 —— 服务端在握手后主动断开了。"
+                "常见原因：同一个 agent_id 还有另一条连接（gateway 或 openclaw 在跑）。"
+            )
+            return
+
+        if loop.time() >= next_heartbeat:
+            with contextlib.suppress(Exception):
+                await ws.send(
+                    protocol.encode(
+                        protocol.envelope(
+                            "heartbeat",
+                            agent_id=agent_id,
+                            device_id=device_id,
+                            client=client_name(),
+                            job_id=protocol.new_id(),
+                        )
+                    )
+                )
+            next_heartbeat = loop.time() + 30.0
+
+    result.step("保持连接", True, f"稳定保持 {seconds:.0f}s（收到 {inbound} 帧）")
+    result.verdict = (
+        f"✅ 连接已稳定保持 {seconds:.0f} 秒。此刻理想 APP 里应该显示「在线」——"
+        "如果仍显示离线，说明 APP 绑定的 agent_id 与这里用的不是同一个。"
+    )
+
+
+async def run_probe(*, timeout: float = 20.0, hold: float = 0.0) -> ProbeResult:
     result = ProbeResult()
 
     # -- 1. 凭据 ---------------------------------------------------------
@@ -56,6 +125,10 @@ async def run_probe(*, timeout: float = 20.0) -> ProbeResult:
         result.verdict = "缺 agent_id。执行 `hermes-livis login` 生成并在 APP 里绑定。"
         return result
     device_id = creds.device_id
+    # 把状态目录一起打出来：CLI 与 gateway 解析到不同的 HERMES_HOME /
+    # LIVIS_STATE_DIR 是「APP 显示离线」的头号元凶（systemd / 容器换了 HOME，
+    # 于是两边各有一份 agent.id，APP 绑的是 CLI 那份）。
+    result.step("状态目录", True, str(creds.directory))
     result.step(
         "凭据", True, f"agent_id={agent_id} device_id={redact_secret(device_id, keep=10)}"
     )
@@ -119,6 +192,8 @@ async def run_probe(*, timeout: float = 20.0) -> ProbeResult:
                     result.verdict = (
                         "✅ 理想中继接受了这个客户端。协议链路通，可以启动网关了。"
                     )
+                    if hold > 0:
+                        await _hold_connection(ws, result, agent_id, device_id, hold)
                     return result
                 # 握手期间还可能先收到别的帧（如 token_expiring），继续等。
                 result.step("收到帧", True, f"type={kind}（继续等 connected）")

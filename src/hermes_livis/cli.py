@@ -51,6 +51,22 @@ def _build_parser() -> argparse.ArgumentParser:
     inst_status.add_argument("--home")
     inst_status.add_argument("--json", action="store_true", dest="as_json")
 
+    echo = subs.add_parser(
+        "echo",
+        help="联调回声模式：绕过 Hermes 生命周期直接跑适配器，用桩回复代替 agent",
+    )
+    echo.add_argument(
+        "--reply",
+        default="你好啊 #{n}",
+        metavar="模板",
+        help="回复模板，可用 {n} 序列号 / {text} 原文 / {node} 发送方（默认「你好啊 #{n}」）",
+    )
+    echo.add_argument(
+        "--duration", type=float, default=0.0, metavar="秒",
+        help="运行这么多秒后自动退出（默认一直跑到 Ctrl-C）",
+    )
+    echo.add_argument("--verbose", "-v", action="store_true", help="打开 DEBUG 日志")
+
     # 凭据管理子命令，与插件内 CLI 共用实现
     plugin_cli.build_subcommands_into(subs)
     return parser
@@ -133,6 +149,15 @@ def main(argv: list[str] | None = None) -> int:
                 print("  下一步：hermes-livis status  # 看凭据是否就绪")
             print()
             return 0
+
+        if command == "echo":
+            from .echo import main as echo_main
+
+            return echo_main(
+                reply_template=args.reply,
+                duration=float(args.duration),
+                verbose=bool(args.verbose),
+            )
 
         if command in {
             "login", "logout", "status", "probe",

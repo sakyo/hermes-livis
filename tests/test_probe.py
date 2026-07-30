@@ -193,3 +193,70 @@ async def test_probe_never_leaks_the_token(
     rendered = "\n".join(probe_mod.format_result(result))
     assert "at-probe" not in rendered
     assert "rt-test" not in rendered
+
+
+# ---------------------------------------------------------------------------
+# --hold：连上并保持，用来在理想 APP 里确认「在线」
+# ---------------------------------------------------------------------------
+
+async def test_hold_keeps_the_connection_open(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    relay = Relay("accept")
+    idaas = Idaas()
+    await relay.start()
+    await idaas.start()
+    monkeypatch.setenv("LIVIS_WS_URL", relay.url)
+    monkeypatch.setenv("LIVIS_IDAAS_ENDPOINT", idaas.url)
+    try:
+        result = await probe_mod.run_probe(timeout=3.0, hold=0.6)
+    finally:
+        await relay.stop()
+        await idaas.stop()
+
+    assert result.ok is True
+    hold_step = _step(result, "保持连接")
+    assert hold_step is not None and hold_step[1] is True
+    assert "在线" in result.verdict
+
+
+async def test_hold_reports_a_mid_flight_disconnect(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """握手后被踢掉 —— 最常见是同一 agent_id 还有另一条连接。"""
+
+    class KickRelay(Relay):
+        async def _handler(self, ws: Any) -> None:
+            raw = await ws.recv()
+            self.handshakes.append(json.loads(raw))
+            await ws.send(
+                json.dumps({"type": "connected", "metadata": {}, "payload": {}})
+            )
+            await asyncio.sleep(0.1)
+            await ws.close(code=1011, reason="replaced")
+
+    relay = KickRelay("accept")
+    idaas = Idaas()
+    await relay.start()
+    await idaas.start()
+    monkeypatch.setenv("LIVIS_WS_URL", relay.url)
+    monkeypatch.setenv("LIVIS_IDAAS_ENDPOINT", idaas.url)
+    try:
+        result = await probe_mod.run_probe(timeout=3.0, hold=2.0)
+    finally:
+        await relay.stop()
+        await idaas.stop()
+
+    assert result.ok is False
+    assert "没保持住" in result.verdict
+    assert "另一条连接" in result.verdict
+
+
+async def test_probe_reports_the_state_dir(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CLI 与 gateway 解析到不同状态目录是「APP 显示离线」的头号元凶。"""
+    result = await _run("accept", monkeypatch)
+    step = _step(result, "状态目录")
+    assert step is not None
+    assert str(state_dir) in step[2]
