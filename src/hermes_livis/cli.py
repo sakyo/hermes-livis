@@ -51,6 +51,20 @@ def _build_parser() -> argparse.ArgumentParser:
     inst_status.add_argument("--home")
     inst_status.add_argument("--json", action="store_true", dest="as_json")
 
+    why = subs.add_parser(
+        "why-offline",
+        help="自动诊断「已绑定但显示离线」，并打印相关网关日志",
+    )
+    why.add_argument("--home")
+    why.add_argument(
+        "-n", "--lines", type=int, default=15, help="附带多少条日志（默认 15）"
+    )
+
+    logs = subs.add_parser("logs", help="打印网关日志里的 [livis] 行")
+    logs.add_argument("--home")
+    logs.add_argument("-n", "--lines", type=int, default=40)
+    logs.add_argument("--all", action="store_true", help="不过滤，打印全部日志尾部")
+
     echo = subs.add_parser(
         "echo",
         help="联调回声模式：绕过 Hermes 生命周期直接跑适配器，用桩回复代替 agent",
@@ -132,6 +146,9 @@ def main(argv: list[str] | None = None) -> int:
             print("─" * 46)
             print(f"  发行包版本    : {info['package_version']}")
             print(f"  Python        : {info['python']}")
+            profile = info.get("profile", "default")
+            marker = "" if profile == "default" else "  ← 非默认 profile！"
+            print(f"  激活 profile  : {profile}{marker}")
             print(f"  Hermes 主目录 : {info['hermes_home']}")
             print(f"  Hermes 版本   : {info['hermes_version'] or '<未检测到>'}")
             print(f"  已安装        : {'是' if info['installed'] else '否'} ({info['install_path']})")
@@ -148,6 +165,48 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("  下一步：hermes-livis status  # 看凭据是否就绪")
             print()
+            return 0
+
+        if command == "why-offline":
+            from .diagnose import diagnose, env_summary, format_diagnosis, tail_command
+
+            home = Path(args.home) if args.home else None
+            result = diagnose(home)
+            for line in format_diagnosis(result, show_lines=int(args.lines)):
+                print(line)
+            env = env_summary()
+            if env:
+                print("  相关环境变量：")
+                for key, value in env.items():
+                    print(f"    {key}={value}")
+                print()
+            print("  实时跟踪：")
+            print(f"    {tail_command(home)}")
+            print()
+            return 0 if result.ok else 1
+
+        if command == "logs":
+            from .diagnose import log_paths, read_livis_lines, tail_command
+
+            home = Path(args.home) if args.home else None
+            path, lines = read_livis_lines(
+                home, limit=int(args.lines), only_livis=not args.all
+            )
+            if path is None:
+                print("找不到网关日志。预期路径：")
+                for candidate in log_paths(home):
+                    print(f"  {candidate}")
+                print("网关若是前台运行的，日志直接打在终端。")
+                return 1
+            print(f"# {path}")
+            for line in lines:
+                print(line)
+            if not lines:
+                print(
+                    "（没有 [livis] 行 —— 用 `hermes-livis why-offline` 看是为什么）"
+                )
+            print()
+            print(f"# 实时跟踪：{tail_command(home)}")
             return 0
 
         if command == "echo":

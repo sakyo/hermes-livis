@@ -73,16 +73,60 @@ def payload_dir() -> Path:
     return Path(__file__).resolve().parent / "plugin"
 
 
+def active_profile(root: Path | None = None) -> str:
+    """当前 sticky 激活的 profile 名（``default`` 表示没用 profile）。
+
+    Hermes 把它记在**默认 home** 下的 ``active_profile`` 文件里
+    （``hermes_cli/profiles.py: _get_active_profile_path``）。
+    """
+    base = root or (Path.home() / ".hermes")
+    try:
+        name = (base / "active_profile").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "default"
+    return name or "default"
+
+
+def profile_home(profile: str, root: Path | None = None) -> Path:
+    """profile 对应的 HERMES_HOME。
+
+    规则见 ``hermes_cli/service_manager.py``::
+
+        root if profile == "default" else root / "profiles" / profile
+    """
+    base = (root or (Path.home() / ".hermes")).expanduser().resolve()
+    if base.parent.name == "profiles":  # 已经是一个 profile home
+        base = base.parent.parent
+    return base if profile == "default" else base / "profiles" / profile
+
+
 def hermes_home() -> Path:
+    """本次操作的目标 home。
+
+    解析顺序：``HERMES_HOME`` → hermes 自己的解析 → **sticky active_profile** →
+    平台默认。
+
+    最后那一步很关键：``hermes-livis`` 通常在交互 shell 里执行，而网关可能跑在
+    某个 profile 下（``~/.hermes/profiles/<name>/``）。若这里退回默认 home，
+    插件与凭据就会装进**另一个 profile**，网关永远看不见 —— 表现为「装了、
+    绑定了，但一行 [livis] 日志都没有」。
+    """
     raw = os.getenv("HERMES_HOME", "").strip()
     if raw:
         return Path(raw).expanduser().resolve()
     try:
         from hermes_constants import get_hermes_home
 
-        return Path(get_hermes_home()).resolve()
+        resolved = Path(get_hermes_home()).resolve()
+        # hermes 在 HERMES_HOME 未设时会退回默认 home（并只打一行警告），
+        # 所以这里要自己再看一眼 active_profile。
+        profile = active_profile(resolved)
+        if profile != "default":
+            return profile_home(profile, resolved)
+        return resolved
     except Exception:
-        return (Path.home() / ".hermes").resolve()
+        default = (Path.home() / ".hermes").resolve()
+        return profile_home(active_profile(default), default)
 
 
 def resolve_paths(home: Path | None = None) -> InstallPaths:
@@ -390,7 +434,10 @@ def status(*, home: Path | None = None) -> dict[str, Any]:
     version = detect_hermes_version()
     installed = (paths.target / "plugin.yaml").exists()
     state = paths.hermes_home / "livis"
+    profile = active_profile()
     return {
+        "profile": profile,
+        "profile_home": str(profile_home(profile)),
         "hermes_home": str(paths.hermes_home),
         "hermes_version": ".".join(map(str, version)) if version else "",
         "installed": installed,

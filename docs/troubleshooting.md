@@ -1,7 +1,26 @@
 # 排查
 
-所有日志行都带 `[livis]` 前缀。先看 `hermes-livis doctor` 和
-`hermes-livis status`，它们都是只读的。
+**先跑这一条**，它会把下面大部分情况直接判出来：
+
+```bash
+hermes-livis why-offline
+```
+
+所有日志行都带 `[livis]` 前缀。`hermes-livis doctor` / `status` / `logs`
+也都是只读的。
+
+## 装了、绑定了，但一行 `[livis]` 日志都没有
+
+适配器**从未被实例化**。按概率排：
+
+1. **装完没重启网关** —— 插件只在**进程启动时**被发现，往 `plugins/` 放文件、
+   往 `config.yaml` 写 `enabled`，对已经在跑的进程毫无影响。`hermes gateway restart`。
+2. **装错 profile** —— 非默认 profile 的 `HERMES_HOME` 是
+   `<root>/profiles/<name>/`，插件/凭据/日志全在那底下。用
+   `HERMES_HOME=~/.hermes/profiles/<name> hermes-livis install`。
+3. **没写进 `plugins.enabled`** —— 用户插件是 opt-in 的，光复制目录不会被加载。
+4. **无凭据且没设 `LIVIS_ENABLED=true`** —— 平台不会被启用（这是刻意的，
+   免得打扰从没配过这条渠道的人）。
 
 ## 平台压根没出现
 

@@ -49,7 +49,9 @@ hermes-livis import-openclaw      # 搬 ~/.openclaw/ 的 token / agent_id / devi
 |---|---|
 | `hermes-livis install [--home DIR] [--no-enable] [--allow-any-hermes]` | 原子安装到 `<hermes-home>/plugins/livis-glass/` 并写入 `plugins.enabled` |
 | `hermes-livis uninstall [--purge]` | 卸载；**默认保留**凭据与投递状态 |
-| `hermes-livis doctor [--json]` | 检查安装、启用状态与 Hermes 基类接口 |
+| `hermes-livis doctor [--json]` | 检查安装、启用状态、激活 profile 与 Hermes 基类接口 |
+| `hermes-livis why-offline [-n N]` | **自动诊断「已绑定但显示离线」**，并附上相关网关日志 |
+| `hermes-livis logs [-n N] [--all]` | 打印网关日志里的 `[livis]` 行 |
 | `hermes-livis login [--force] [--open-browser]` | OAuth2 设备码登录 |
 | `hermes-livis logout [--local-only] [--show-browser-url]` | 在 IDaaS 撤销 refresh_token 并清本地 |
 | `hermes-livis status [--json]` | 凭据与待投递状态（只读，不生成 agent_id） |
@@ -170,6 +172,28 @@ Hermes 的 delivery ledger 在适配器 `send()` 返回 `success=True` 时就把
 * **输出风格**：`platform_hint` 已把「给耳朵写字」的规则注入系统提示 —— 纯口语、
   无 markdown / 列表 / 表格 / 代码块 / emoji、两三句话说完、一次请求只有一次回复。
 
+## profile
+
+Hermes 支持 profile（`hermes profile use <name>`）。非默认 profile 的
+`HERMES_HOME` 是 **`<root>/profiles/<name>/`**，于是插件目录、凭据、日志**全都
+跟着搬家**：
+
+| | 默认 profile | profile `55` |
+|---|---|---|
+| 插件 | `~/.hermes/plugins/` | `~/.hermes/profiles/55/plugins/` |
+| 凭据 | `~/.hermes/livis/` | `~/.hermes/profiles/55/livis/` |
+| 日志 | `~/.hermes/logs/` | `~/.hermes/profiles/55/logs/` |
+
+`hermes-livis` 会读 `~/.hermes/active_profile` 自动跟随当前 profile；也可以用
+`HERMES_HOME` 或 `--home` 显式指定。**装错 profile 的表现是「装了、绑定了，
+但一行 `[livis]` 日志都没有」**——`hermes-livis why-offline` 会直接判出来。
+
+```bash
+# 显式指定 profile 55
+export HERMES_HOME=~/.hermes/profiles/55
+hermes-livis install && hermes-livis import-openclaw
+```
+
 ## 兼容性
 
 硬性要求是 **Hermes 基类接口齐备**（安装时实探）：
@@ -187,7 +211,7 @@ interrupt_session_activity · validate_media_delivery_path
 
 ```bash
 pip install -e ".[dev]"
-HERMES_REPO=/path/to/hermes-agent pytest -q     # 135 个测试
+HERMES_REPO=/path/to/hermes-agent pytest -q     # 155 个测试
 ruff check .
 ```
 
