@@ -189,7 +189,11 @@ def result_data(text: str, files: list[dict[str, Any]] | None = None) -> str:
 
 
 def ack_target(frame: dict[str, Any]) -> str:
-    """``ack_send_result`` 对应的 job：三级兜底，与上游一致。"""
+    """``ack_send_result`` 对应的 job：三级兜底，与上游一致。
+
+    实测生产中继的 ack 帧里**没有** ``payload.ref_msg_id``，靠的是
+    ``metadata.job_id`` 兜底 —— 只实现第一级会完全收不到确认。
+    """
     payload = frame.get("payload") or {}
     meta = frame.get("metadata") or {}
     return str(
@@ -198,6 +202,29 @@ def ack_target(frame: dict[str, Any]) -> str:
         or meta.get("msg_id")
         or ""
     )
+
+
+def ack_is_success(frame: dict[str, Any]) -> tuple[bool, str]:
+    """``ack_send_result`` 是「已送达」还是「已收到但失败」？
+
+    实测生产中继回的是 ``payload: {"code": "0", "message": "ok"}`` —— ack 里带
+    业务状态码。把任何 ack 都当成投递成功，会在服务端明确报错时静默丢掉这一轮
+    的回复（不重试、也不告警）。上游插件没有检查它，这里补上。
+
+    返回 ``(是否成功, 说明)``。缺 ``code`` 字段时按成功处理：老版本中继/未来
+    变更不该导致我们把成功的投递误判为失败而无谓重发。
+    """
+    payload = frame.get("payload") or {}
+    if "code" not in payload:
+        return True, ""
+    raw = payload.get("code")
+    message = str(payload.get("message") or "")
+    try:
+        ok = int(str(raw).strip()) == 0
+    except (TypeError, ValueError):
+        # 非数字状态码：无法判断，按成功处理但把原值带出去便于排查。
+        return True, f"code={raw!r} message={message}"
+    return ok, f"code={raw} message={message}"
 
 
 def frame_summary(frame: dict[str, Any]) -> dict[str, str]:

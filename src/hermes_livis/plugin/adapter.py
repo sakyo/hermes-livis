@@ -87,7 +87,7 @@ from .constants import (
     ws_url,
 )
 from .documents import upload_document, upload_rejection_reason
-from .safeio import ensure_private_dir, redact_secret
+from .safeio import ensure_private_dir, redact_secret, redact_text
 from .store import PendingResultStore
 
 logger = logging.getLogger(__name__)
@@ -160,6 +160,12 @@ class LivisAdapter(BasePlatformAdapter):
             10.0,
             _float_env("LIVIS_JOB_WATCHDOG_SECONDS", DEFAULT_JOB_WATCHDOG_SECONDS),
         )
+
+        # 协议考古开关：把中继原样发来的帧打进日志。理想若在 payload 里多塞了
+        # 官方插件不消费的字段（图片、位置…），只有开着它才看得见。
+        self._log_raw_frames = os.getenv(
+            "LIVIS_LOG_RAW_FRAMES", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
         root = ensure_private_dir(state_dir())
         self._store = PendingResultStore(
@@ -383,6 +389,11 @@ class LivisAdapter(BasePlatformAdapter):
             async for raw in ws:
                 if not self._running:
                     break
+                if self._log_raw_frames:
+                    # 协议考古用：把中继原样发来的帧打出来（令牌脱敏）。理想若在
+                    # payload / inner 里多塞了字段（图片、位置、设备信息…），
+                    # 官方插件会静默忽略，只有这里能看见。
+                    logger.info("[livis] ← 原始帧 %s", redact_text(str(raw))[:4000])
                 try:
                     frame = protocol.parse_frame(raw)
                 except protocol.ProtocolError as exc:
@@ -618,14 +629,27 @@ class LivisAdapter(BasePlatformAdapter):
         job_id = protocol.ack_target(frame)
         if not job_id:
             return
-        if self._store.is_pending(job_id):
-            self._store.complete(job_id)
-            task = self._ack_tasks.pop(job_id, None)
-            if task and not task.done():
-                task.cancel()
-            logger.info("[livis] job %s 结果已确认送达", job_id)
-        else:
+        if not self._store.is_pending(job_id):
             logger.debug("[livis] ack_send_result 无对应待确认项: %s", job_id)
+            return
+
+        ok, detail = protocol.ack_is_success(frame)
+        if not ok:
+            # ack 到了但服务端说这次投递失败 —— 保持 pending，让 ack 超时逻辑
+            # 去重发。把它当成功会静默丢掉这一轮的回复。
+            logger.warning(
+                "[livis] job %s 投递被中继拒绝（%s），保留待重发", job_id, detail
+            )
+            return
+
+        self._store.complete(job_id)
+        task = self._ack_tasks.pop(job_id, None)
+        if task and not task.done():
+            task.cancel()
+        logger.info(
+            "[livis] job %s 结果已确认送达%s",
+            job_id, f"（{detail}）" if detail else "",
+        )
 
     # ------------------------------------------------------------------
     # job 台账

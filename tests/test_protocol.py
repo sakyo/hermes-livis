@@ -156,3 +156,121 @@ def test_frame_summary_leaks_no_payload() -> None:
         {"type": "send_message", "metadata": {"job_id": "j"}, "payload": {"data": "秘密"}}
     )
     assert summary == {"type": "send_message", "job_id": "j", "msg_id": ""}
+
+
+# ---------------------------------------------------------------------------
+# 生产中继实录帧（2026-07-30 联调抓取）
+#
+# 这些是真实理想中继发来的原始帧，逐字固化。代码里"看起来对"的解析，只有对
+# 上真实字节才算数 —— 下面每条都对应一个曾经差点写错的地方。
+# ---------------------------------------------------------------------------
+
+REAL_CONNECTED = {
+    "type": "connected",
+    "metadata": {
+        "msg_id": "66a61199-c53f-42d1-8404-ca39d41125c9",
+        "device_id": "pc_a2bb9fd7",
+        "client": "openclaw",
+        "timestamp": 1785421561005,
+    },
+    "payload": {
+        "client": "openclaw",
+        "device_id": "pc_a2bb9fd7",
+        # 中继分配的会话 id —— 官方插件完全忽略了它。
+        "session_id": "f6c91ecf-3c50-4f10-b936-cec7499d6355",
+    },
+}
+
+REAL_SEND_MESSAGE = {
+    "type": "send_message",
+    "metadata": {
+        "msg_id": "595f54b6-b4e9-461f-b186-2a47d0a65d65",
+        "job_id": "20260730222728-73e7df77-9c50-4cbc-9908-6be524f5b91a",
+        "agent_id": "openclaw-a79d8c0d",
+        "device_id": "pc_a2bb9fd7",
+        "client": "openclaw",
+        "timestamp": 1785421648561,
+    },
+    "payload": {
+        # data 是 JSON **字符串**，且 inner 里有官方插件不读的 reply_to
+        "data": '{"content":"好啊","reply_to":"8D4BA57C","type":"exec"}',
+        "from_node_id": "8D4BA57C",
+        "to_node_id": "pc_a2bb9fd7",
+        # 注意：中继自己用的是拼写正确的 personal-device，
+        # 而官方插件出站发的是拼错的 personl-device（实测服务端接受）。
+        "to_node_type": "personal-device",
+    },
+}
+
+REAL_ACK_SEND_RESULT = {
+    "type": "ack_send_result",
+    "metadata": {
+        "msg_id": "f9f4f8f9-8c3f-4c3c-b921-10edebb29afc",
+        "job_id": "20260730222728-73e7df77-9c50-4cbc-9908-6be524f5b91a",
+        "agent_id": "openclaw-a79d8c0d",
+        "device_id": "pc_a2bb9fd7",
+        "client": "openclaw",
+        "timestamp": 1785421648706,
+    },
+    # 没有 ref_msg_id！而且带业务状态码。
+    "payload": {"code": "0", "message": "ok"},
+}
+
+
+def test_real_send_message_parses() -> None:
+    request = protocol.parse_exec_request(REAL_SEND_MESSAGE)
+    assert request.job_id == "20260730222728-73e7df77-9c50-4cbc-9908-6be524f5b91a"
+    assert request.content == "好啊"
+    assert request.from_node_id == "8D4BA57C"
+    assert request.msg_id == "595f54b6-b4e9-461f-b186-2a47d0a65d65"
+
+
+def test_real_send_message_carries_no_media() -> None:
+    """实测：说「拍个照片儿」也只发来转写文本，没有任何附件字段。
+
+    这条渠道没有图片入站通路 —— 若哪天中继开始带媒体字段，这个断言会失败，
+    正好提醒我们去接。
+    """
+    inner = protocol.parse_inner_data(REAL_SEND_MESSAGE["payload"]["data"])
+    assert set(inner) == {"content", "reply_to", "type"}
+    media_ish = {"files", "images", "media", "objectKey", "url", "attachments"}
+    assert not (media_ish & set(inner))
+    assert not (media_ish & set(REAL_SEND_MESSAGE["payload"]))
+
+
+def test_real_ack_has_no_ref_msg_id_and_falls_back_to_job_id() -> None:
+    """生产 ack 里没有 ref_msg_id —— 只实现第一级会完全收不到确认。"""
+    assert "ref_msg_id" not in REAL_ACK_SEND_RESULT["payload"]
+    assert protocol.ack_target(REAL_ACK_SEND_RESULT) == (
+        "20260730222728-73e7df77-9c50-4cbc-9908-6be524f5b91a"
+    )
+
+
+def test_real_ack_code_zero_is_success() -> None:
+    ok, detail = protocol.ack_is_success(REAL_ACK_SEND_RESULT)
+    assert ok is True
+    assert "code=0" in detail
+
+
+def test_nonzero_ack_code_is_failure() -> None:
+    """服务端明确报错时不能当成已送达，否则这一轮回复被静默丢弃。"""
+    frame = {"type": "ack_send_result", "payload": {"code": "500", "message": "boom"}}
+    ok, detail = protocol.ack_is_success(frame)
+    assert ok is False
+    assert "boom" in detail
+
+
+def test_missing_ack_code_defaults_to_success() -> None:
+    """没有 code 字段时按成功处理，不要把成功的投递误判成失败去重发。"""
+    assert protocol.ack_is_success({"payload": {}})[0] is True
+    assert protocol.ack_is_success({})[0] is True
+
+
+def test_non_numeric_ack_code_defaults_to_success() -> None:
+    ok, detail = protocol.ack_is_success({"payload": {"code": "OK"}})
+    assert ok is True
+    assert "OK" in detail
+
+
+def test_real_connected_frame_parses() -> None:
+    assert protocol.parse_frame(json.dumps(REAL_CONNECTED))["type"] == "connected"
