@@ -6,7 +6,7 @@
 src/hermes_livis/
 ├── cli.py            hermes-livis 命令行入口（安装 + 凭据管理）
 ├── installer.py      原子安装 / 卸载 / doctor / plugins.enabled 维护
-└── plugin/           ← 被整目录复制到 <hermes-home>/plugins/livis-platform/
+└── plugin/           ← 被整目录复制到 <hermes-home>/plugins/livis-glass/
     ├── plugin.yaml   插件清单（kind: platform）
     ├── constants.py  端点、协议常量、超时参数、路径解析
     ├── protocol.py   帧构造与解析（纯函数，与传输解耦）
@@ -25,12 +25,13 @@ src/hermes_livis/
 
 | 环节 | 机制 |
 |---|---|
-| 插件发现 | 装在 `<hermes-home>/plugins/livis-platform/` ⇒ 用户插件 ⇒ 由 `plugins.enabled` 白名单 opt-in（安装器自动写入） |
-| 平台名 | 清单名 `livis-platform` 去掉 `-platform` ⇒ `livis`；`Platform("livis")` 经 `platform_registry.is_registered` 的运行时回退解析 |
+| 插件发现 | 装在 `<hermes-home>/plugins/livis-glass/` ⇒ 用户插件 ⇒ 由 `plugins.enabled` 白名单 opt-in（安装器自动写入） |
+| 平台名 | **与插件名无关**：用户插件是被直接 import 后调 `register(ctx)` 的，平台名来自 `register_platform(name="livis")`（只有仓库内置插件才用「清单名去掉 `-platform`」推导）。`Platform("livis")` 经 `platform_registry.is_registered` 的运行时回退解析 |
 | 平台启用 | `check_requirements()` / `is_connected()` 检查凭据是否齐备；齐备则 `load_gateway_config()` 自动置 `enabled=True` 并播种 `extra` |
 | 入站 | `handle_message(MessageEvent)` → 后台跑 agent |
 | 出站 | `send()` / `send_document()` 写入 job 缓冲 |
 | 收口 | `on_processing_complete(event, outcome)` |
+| 登录时机 | `connect()` 无凭据也返回 True，主循环挂等待态轮询；`LIVIS_ENABLED=true` 让平台在无凭据时也被启用 |
 | 中断 | `interrupt_session_activity(session_key, chat_id)` |
 | 附件安全 | `validate_media_delivery_path(path)` |
 

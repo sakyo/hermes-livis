@@ -16,8 +16,8 @@ pip install hermes-livis
 hermes-livis install
 ```
 
-`install` 会：把插件负载原子复制到 `<hermes-home>/plugins/livis-platform/`
-（有旧版本则先备份，失败自动回滚），并把 `livis-platform` 写进 `config.yaml` 的
+`install` 会：把插件负载原子复制到 `<hermes-home>/plugins/livis-glass/`
+（有旧版本则先备份，失败自动回滚），并把 `livis-glass` 写进 `config.yaml` 的
 `plugins.enabled`。
 
 先自检一下：
@@ -27,6 +27,10 @@ hermes-livis doctor
 ```
 
 「基类接口 齐备」是唯一的硬性条件。版本号不匹配只会告警，不阻止安装。
+
+> 从 1.0 之前的版本升级时，安装器会自动把旧目录 `livis-platform` 删掉、并从
+> `plugins.enabled` 里换成 `livis-glass` —— 两个目录同时存在会各自注册同一个
+> 平台名，谁生效取决于扫描顺序。
 
 ### 2. 登录
 
@@ -101,6 +105,15 @@ LIVIS_JOB_WATCHDOG_SECONDS=300
 
 凭据不要放进 env —— refresh_token 会被服务端轮换，放 env 里写不回去。让它留在
 `<hermes-home>/livis/tokens.json`（`0600`）。
+
+**注意 systemd 下的 `HOME`**：CLI 与网关必须解析到同一个 `<hermes-home>/livis/`，
+否则两边各有一份 `agent.id`，APP 里绑的是 CLI 那份，网关却拿另一份去连 —— 表现
+就是「已绑定但显示离线」。`hermes-livis probe` 会把它实际用的状态目录打出来，
+和网关日志里 `[livis] 适配器已初始化 … state=…` 那一行比对即可。
+
+先起网关、后登录是支持的：适配器会挂在等待态（每 5 秒读一次凭据文件），
+`hermes-livis login` 之后自动连上，不必重启网关。前提是设了 `LIVIS_ENABLED=true`
+（否则无凭据时平台不会被启用）。
 
 ## 容器化
 

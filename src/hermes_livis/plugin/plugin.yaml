@@ -1,4 +1,4 @@
-name: livis-platform
+name: livis-glass
 label: 理想眼镜 (Livis)
 kind: platform
 version: 1.0.0
@@ -17,8 +17,21 @@ author: hermes-livis contributors
 # 因此 requires_env 为空 —— 配置入口是 `hermes-livis login`。
 optional_env:
   - name: LIVIS_ENABLED
-    description: "设为 false / 0 可在不删凭据的情况下临时关闭本渠道"
+    description: >-
+      设为 true 时，即使还没有凭据也启用本渠道 —— 适配器会挂在等待态，
+      hermes-livis login 之后自动连上，无需重启网关。设为 false / 0 则在不删
+      凭据的情况下临时关闭。有凭据时留空即可（自动启用）。
     prompt: "启用理想眼镜渠道？(true/false)"
+    password: false
+  - name: LIVIS_CREDENTIAL_POLL_SECONDS
+    description: "未登录时多久检查一次凭据（秒，默认 5）"
+    prompt: "凭据轮询间隔秒数（默认 5）"
+    password: false
+  - name: LIVIS_LOG_RAW_FRAMES
+    description: >-
+      设为 1 时把中继原样发来的帧打进日志（令牌脱敏）。协议考古用：理想若在
+      payload 里多塞了本插件不消费的字段，只有开着它才看得见。
+    prompt: "记录原始协议帧？(true/false)"
     password: false
   - name: LIVIS_STATE_DIR
     description: "凭据与投递状态目录（默认 <hermes-home>/livis）"

@@ -65,6 +65,7 @@ from . import protocol
 from .auth import LivisAuthError, LivisCredentials
 from .constants import (
     ACK_TIMEOUT,
+    DEFAULT_CREDENTIAL_POLL_SECONDS,
     DEFAULT_JOB_WATCHDOG_SECONDS,
     DEFAULT_RESULT_FALLBACK_MS,
     HEARTBEAT_INTERVAL,
@@ -160,6 +161,14 @@ class LivisAdapter(BasePlatformAdapter):
             10.0,
             _float_env("LIVIS_JOB_WATCHDOG_SECONDS", DEFAULT_JOB_WATCHDOG_SECONDS),
         )
+        # 未登录时多久检查一次凭据。只读一个小文件，代价可忽略；不写任何东西。
+        self._credential_poll_seconds = max(
+            1.0,
+            _float_env(
+                "LIVIS_CREDENTIAL_POLL_SECONDS", DEFAULT_CREDENTIAL_POLL_SECONDS
+            ),
+        )
+        self._waiting_for_credentials = False
 
         # 协议考古开关：把中继原样发来的帧打进日志。理想若在 payload 里多塞了
         # 官方插件不消费的字段（图片、位置…），只有开着它才看得见。
@@ -222,41 +231,39 @@ class LivisAdapter(BasePlatformAdapter):
     # 生命周期
     # ------------------------------------------------------------------
 
+    def _load_identity(self) -> bool:
+        """从凭据里刷新 agent_id / device_id，返回是否已具备连接条件。
+
+        每次进入连接循环都调一次：登录是可以在网关**运行期间**发生的，凭据文件
+        随时可能从无到有（或被 logout 清掉）。
+        """
+        with contextlib.suppress(Exception):
+            # 装过官方 kit 的机器：直接接管它的凭据（含 agent_id，眼镜无需重绑）。
+            self.creds.import_from_openclaw()
+        if not self.creds.refresh_token:
+            return False
+        agent_id = self.creds.agent_id
+        if not agent_id:
+            return False
+        self._agent_id = agent_id
+        self._device_id = self.creds.device_id
+        return True
+
     async def connect(self, *, is_reconnect: bool = False) -> bool:
-        """校验凭据并拉起 WebSocket 主循环。"""
+        """拉起 WebSocket 主循环。
+
+        **没有凭据也返回 True**，主循环会挂在等待态，直到 ``hermes-livis login``
+        写入凭据后自动连上 —— 登录晚于网关启动是很常见的顺序（尤其首次部署），
+        那种情况下要求重启网关既不友好、也容易让人误判成插件坏了。
+
+        只有「不会自己恢复」的前置条件才返回 False：缺 Python 依赖。
+        """
         for module, hint in (("websockets", "websockets"), ("aiohttp", "aiohttp")):
             try:
                 __import__(module)
             except ImportError:
                 logger.error("[livis] 缺少 %s 包: pip install %s", module, hint)
                 return False
-
-        # 装过官方 kit 的机器：直接接管它的凭据（含 agent_id，眼镜无需重绑）。
-        with contextlib.suppress(Exception):
-            self.creds.import_from_openclaw()
-
-        if not self.creds.refresh_token:
-            logger.error(
-                "[livis] 未登录。执行 `hermes-livis login` 完成理想账号登录，"
-                "或 `hermes-livis import-openclaw` 导入 openclaw 已有凭据。"
-            )
-            return False
-
-        self._agent_id = self.creds.agent_id
-        self._device_id = self.creds.device_id
-        if not self._agent_id:
-            logger.error(
-                "[livis] 缺少 agent_id。执行 `hermes-livis login` 生成，"
-                "并在理想 APP 里把它绑定到眼镜。"
-            )
-            return False
-
-        # 提前验一次凭据：拿不到 access_token 就没必要建连（报错也更清楚）。
-        try:
-            await self.creds.get_access_token()
-        except LivisAuthError as exc:
-            logger.error("[livis] 凭据校验失败: %s", exc)
-            return False
 
         pruned = self._store.prune()
         if pruned:
@@ -267,11 +274,19 @@ class LivisAdapter(BasePlatformAdapter):
         self._ws_task = asyncio.create_task(self._ws_loop(), name="livis-transport")
         if hasattr(self, "_mark_connected"):
             self._mark_connected()
-        logger.info(
-            "[livis] 已启动，agent_id=%s device_id=%s 待投递=%d",
-            self._agent_id, redact_secret(self._device_id, keep=10),
-            self._store.snapshot()["pending"],
-        )
+
+        if self._load_identity():
+            logger.info(
+                "[livis] 已启动，agent_id=%s device_id=%s 待投递=%d",
+                self._agent_id, redact_secret(self._device_id, keep=10),
+                self._store.snapshot()["pending"],
+            )
+        else:
+            logger.warning(
+                "[livis] 尚未登录 —— 适配器已在后台等待凭据（每 %.0fs 检查一次）。"
+                "执行 `hermes-livis login` 后**无需重启网关**。",
+                self._credential_poll_seconds,
+            )
         return True
 
     async def disconnect(self) -> None:
@@ -323,6 +338,13 @@ class LivisAdapter(BasePlatformAdapter):
         分支退避，那一刻就会变成对中继的高频重连风暴。
         """
         while self._running:
+            # 凭据可能在网关运行期间才出现（先起网关、后 login），也可能中途被
+            # logout 或服务端判定失效而清掉。每轮都重新读一次。
+            if not self._load_identity():
+                if await self._wait_for_credentials():
+                    continue
+                break
+
             try:
                 await self._run_connection()
             except asyncio.CancelledError:
@@ -349,6 +371,33 @@ class LivisAdapter(BasePlatformAdapter):
                 await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 break
+
+    async def _wait_for_credentials(self) -> bool:
+        """等到凭据出现为止。返回 False 表示适配器正在关停。
+
+        只在**状态变化**时打日志：等待期可能持续几天，每 5 秒刷一行会把网关日志
+        淹掉。也不写任何文件 —— 等待本身不该产生磁盘 IO。
+        """
+        if not self._waiting_for_credentials:
+            self._waiting_for_credentials = True
+            logger.warning(
+                "[livis] 等待登录中……执行 `hermes-livis login`（或 "
+                "`hermes-livis import-openclaw`）后会自动连上，无需重启网关。"
+                "凭据目录：%s",
+                self.creds.directory,
+            )
+        try:
+            await asyncio.sleep(self._credential_poll_seconds)
+        except asyncio.CancelledError:
+            return False
+        if not self._running:
+            return False
+        if self.creds.refresh_token and self.creds.agent_id:
+            self._waiting_for_credentials = False
+            # 凭据是新出现的，退避计数要清零：之前的失败与这次无关。
+            self._reconnect_attempts = 0
+            logger.info("[livis] 检测到凭据，开始连接")
+        return True
 
     async def _run_connection(self) -> None:
         """建立一次连接并处理消息，直到对端关闭。"""
@@ -1113,33 +1162,64 @@ def has_credentials() -> bool:
     return False
 
 
+def _explicit_enable() -> bool:
+    """``LIVIS_ENABLED`` 是否被显式打开。
+
+    这是「先起网关、后登录」的开关：没有它，无凭据时平台压根不会被实例化，
+    适配器的等待循环也就无从谈起（``connect()`` 永远不会被调用）。
+    """
+    return os.getenv("LIVIS_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _explicit_disable() -> bool:
+    return os.getenv("LIVIS_ENABLED", "").strip().lower() in {"0", "false", "no"}
+
+
 def check_requirements() -> bool:
-    """依赖 + 凭据都就绪才允许网关实例化适配器。
+    """网关是否应该实例化本适配器。
+
+    * 显式 ``LIVIS_ENABLED=false`` → 一律不启用（保留凭据的临时开关）
+    * 缺 Python 依赖 → 不启用（不会自己恢复）
+    * 有凭据 → 启用
+    * 无凭据但 ``LIVIS_ENABLED=true`` → **也启用**，适配器挂在等待态，
+      ``hermes-livis login`` 之后自动连上，不必重启网关
+    * 无凭据且没设 → 不启用（不打扰从没配置过这条渠道的人）
 
     依赖在这里**惰性**导入（而不是模块顶层），这样缺包时插件仍然可被发现、
     ``hermes config`` 也能正确描述它，而不是整个模块 import 失败。
     """
-    if os.getenv("LIVIS_ENABLED", "").strip().lower() in {"0", "false", "no"}:
+    if _explicit_disable():
         return False
     try:
         import aiohttp  # noqa: F401
         import websockets  # noqa: F401
     except ImportError:
         return False
-    return has_credentials()
+    return has_credentials() or _explicit_enable()
 
 
 def validate_config(config: Any) -> bool:
-    return has_credentials()
+    if _explicit_disable():
+        return False
+    return has_credentials() or _explicit_enable()
 
 
 def is_connected(config: Any) -> bool:
-    return has_credentials()
+    return validate_config(config)
 
 
 def env_enablement() -> dict[str, Any] | None:
-    """凭据就绪时给 ``PlatformConfig.extra`` 播种，让 gateway status 能显示。"""
-    if not has_credentials():
+    """给 ``PlatformConfig.extra`` 播种，让 gateway status 能显示配置。
+
+    ``peek_agent_id`` 是只读的：这里绝不能顺手生成 agent_id —— 配置加载会在
+    各种只读场景下被调用（``hermes gateway status``、setup 向导），凭空造一个
+    未绑定的 agent_id 只会让人困惑。
+    """
+    if _explicit_disable():
+        return None
+    if not (has_credentials() or _explicit_enable()):
         return None
     seed: dict[str, Any] = {
         "node_name": node_name(),

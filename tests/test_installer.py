@@ -26,17 +26,27 @@ def test_payload_is_self_contained() -> None:
         assert "import hermes_livis" not in text, f"{module.name} 用了绝对包导入"
 
 
-def test_manifest_name_derives_the_platform_name() -> None:
-    """hermes 用"清单名去掉 -platform"推导平台名，必须是 livis。"""
+def test_plugin_name_is_independent_of_platform_name() -> None:
+    """插件叫 livis-glass，网关平台仍叫 livis。
+
+    用户插件（~/.hermes/plugins/）是被直接 import 后调 register(ctx) 的，平台名
+    来自 register_platform(name=...)，与目录/清单名无关。保持 livis 不变意味着
+    环境变量、会话键、已有绑定都不需要迁移。
+    """
     text = (installer.payload_dir() / "plugin.yaml").read_text(encoding="utf-8")
-    assert "name: livis-platform" in text
-    assert installer.PLUGIN_DIR_NAME == "livis-platform"
+    assert "name: livis-glass" in text
+    assert installer.PLUGIN_DIR_NAME == "livis-glass"
     assert installer.PLATFORM_NAME == "livis"
+    adapter_src = (installer.payload_dir() / "adapter.py").read_text(encoding="utf-8")
+    assert 'PLATFORM_NAME = "livis"' in (
+        (installer.payload_dir() / "constants.py").read_text(encoding="utf-8")
+    )
+    assert "name=PLATFORM_NAME" in adapter_src
 
 
 def test_install_places_payload_and_enables_plugin(tmp_path: Path) -> None:
     result = _install(tmp_path)
-    target = tmp_path / "plugins" / "livis-platform"
+    target = tmp_path / "plugins" / "livis-glass"
     assert (target / "plugin.yaml").is_file()
     assert (target / "adapter.py").is_file()
     assert result["config_changed"] is True
@@ -44,7 +54,7 @@ def test_install_places_payload_and_enables_plugin(tmp_path: Path) -> None:
     import yaml
 
     config = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
-    assert config["plugins"]["enabled"] == ["livis-platform"]
+    assert config["plugins"]["enabled"] == ["livis-glass"]
 
 
 def test_install_is_idempotent_and_backs_up(tmp_path: Path) -> None:
@@ -74,7 +84,7 @@ def test_install_preserves_other_enabled_plugins(tmp_path: Path) -> None:
     )
     _install(tmp_path)
     data = yaml.safe_load(config.read_text(encoding="utf-8"))
-    assert data["plugins"]["enabled"] == ["something-else", "livis-platform"]
+    assert data["plugins"]["enabled"] == ["something-else", "livis-glass"]
     assert data["model"] == "x", "不能破坏 config.yaml 的其他内容"
 
 
@@ -98,7 +108,7 @@ def test_uninstall_keeps_credentials_by_default(tmp_path: Path) -> None:
     import yaml
 
     data = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
-    assert "livis-platform" not in data["plugins"]["enabled"]
+    assert "livis-glass" not in data["plugins"]["enabled"]
 
 
 def test_uninstall_purge_removes_state(tmp_path: Path) -> None:
@@ -155,7 +165,7 @@ def test_version_is_advisory_not_a_hard_gate(
     monkeypatch.setattr(installer, "check_base_apis", lambda **_kw: [])
 
     result = installer.install(home=tmp_path)
-    assert (tmp_path / "plugins" / "livis-platform" / "plugin.yaml").is_file()
+    assert (tmp_path / "plugins" / "livis-glass" / "plugin.yaml").is_file()
     assert "低于已验证下界" in result["version_warning"]
 
 
@@ -195,3 +205,69 @@ def test_broken_config_is_reported_not_silently_overwritten(tmp_path: Path) -> N
     (tmp_path / "config.yaml").write_text("plugins: not-a-mapping\n", encoding="utf-8")
     with pytest.raises(installer.InstallError, match="不是映射"):
         _install(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# 曾用名迁移：livis-platform → livis-glass
+# ---------------------------------------------------------------------------
+
+def test_install_removes_the_legacy_directory(tmp_path: Path) -> None:
+    """两个目录同时存在会各自注册同一个平台名，谁生效取决于扫描顺序。"""
+    legacy = tmp_path / "plugins" / "livis-platform"
+    legacy.mkdir(parents=True)
+    (legacy / "plugin.yaml").write_text("name: livis-platform\n", encoding="utf-8")
+
+    result = _install(tmp_path)
+
+    assert result["removed_legacy"] == ["livis-platform"]
+    assert not legacy.exists()
+    assert (tmp_path / "plugins" / "livis-glass" / "plugin.yaml").is_file()
+
+
+def test_install_drops_the_legacy_enabled_key(tmp_path: Path) -> None:
+    import yaml
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        yaml.safe_dump({"plugins": {"enabled": ["other", "livis-platform"]}}),
+        encoding="utf-8",
+    )
+    result = _install(tmp_path)
+
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert data["plugins"]["enabled"] == ["other", "livis-glass"]
+    assert result["config_changed"] is True
+
+
+def test_legacy_key_is_dropped_even_when_new_key_present(tmp_path: Path) -> None:
+    """残留的旧 key 会让 hermes 去加载一个已不存在的目录。"""
+    import yaml
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        yaml.safe_dump({"plugins": {"enabled": ["livis-platform", "livis-glass"]}}),
+        encoding="utf-8",
+    )
+    result = _install(tmp_path)
+
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert data["plugins"]["enabled"] == ["livis-glass"]
+    assert result["config_changed"] is True
+
+
+def test_uninstall_also_clears_the_legacy_install(tmp_path: Path) -> None:
+    import yaml
+
+    _install(tmp_path)
+    legacy = tmp_path / "plugins" / "livis-platform"
+    legacy.mkdir(parents=True, exist_ok=True)
+    config = tmp_path / "config.yaml"
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    data["plugins"]["enabled"].append("livis-platform")
+    config.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    installer.uninstall(home=tmp_path)
+
+    assert not legacy.exists()
+    left = yaml.safe_load(config.read_text(encoding="utf-8"))["plugins"]["enabled"]
+    assert "livis-platform" not in left and "livis-glass" not in left

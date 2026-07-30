@@ -47,13 +47,14 @@ hermes-livis import-openclaw      # 搬 ~/.openclaw/ 的 token / agent_id / devi
 
 | 命令 | 作用 |
 |---|---|
-| `hermes-livis install [--home DIR] [--no-enable] [--allow-any-hermes]` | 原子安装到 `<hermes-home>/plugins/livis-platform/` 并写入 `plugins.enabled` |
+| `hermes-livis install [--home DIR] [--no-enable] [--allow-any-hermes]` | 原子安装到 `<hermes-home>/plugins/livis-glass/` 并写入 `plugins.enabled` |
 | `hermes-livis uninstall [--purge]` | 卸载；**默认保留**凭据与投递状态 |
 | `hermes-livis doctor [--json]` | 检查安装、启用状态与 Hermes 基类接口 |
 | `hermes-livis login [--force] [--open-browser]` | OAuth2 设备码登录 |
 | `hermes-livis logout [--local-only] [--show-browser-url]` | 在 IDaaS 撤销 refresh_token 并清本地 |
 | `hermes-livis status [--json]` | 凭据与待投递状态（只读，不生成 agent_id） |
-| `hermes-livis probe [--timeout N]` | **连一次真实中继验证握手是否被接受**（先停掉 gateway） |
+| `hermes-livis probe [--timeout N] [--hold 秒]` | **连一次真实中继验证握手是否被接受**；`--hold` 保持连接以便在 APP 里确认「在线」（先停掉 gateway） |
+| `hermes-livis echo [--reply 模板] [--duration 秒]` | **联调回声模式**：绕过 Hermes 生命周期直接跑适配器，用桩回复代替 agent |
 | `hermes-livis import-openclaw` | 从 `~/.openclaw/` 导入凭据 |
 | `hermes-livis reset-agent-id` | 重置 Agent ID（需在 APP 里重新绑定） |
 
@@ -78,6 +79,18 @@ hermes-livis import-openclaw      # 搬 ~/.openclaw/ 的 token / agent_id / devi
 
 三者都是计时器/回调，**不阻塞派发**：任何一个 job 出问题都不会拖住同一副眼镜的
 后续请求。
+
+### 登录可以晚于网关启动
+
+`connect()` 在**没有凭据时也返回 True**，主循环挂在等待态（每 5 秒读一次凭据
+文件，不写任何东西、只在状态变化时打日志），`hermes-livis login` 之后自动连上，
+**不必重启网关**。返回 False 会让网关认为这个平台坏了、不再重试。
+
+只有「不会自己恢复」的前置条件才返回 False：缺 Python 依赖。
+
+配套地，`LIVIS_ENABLED=true` 让平台在**还没有凭据**时也被启用 —— 否则
+`check_requirements()` 返回 False，平台压根不会被实例化，等待循环也就无从谈起。
+有凭据时不需要设它（自动启用）。
 
 ### 崩溃不丢答案
 
@@ -133,12 +146,14 @@ Hermes 的 delivery ledger 在适配器 `send()` 返回 `success=True` 时就把
 
 | 变量 | 默认 | 含义 |
 |---|---|---|
-| `LIVIS_ENABLED` | `true` | 设 `false` 临时停用 |
+| `LIVIS_ENABLED` | 未设 | 设 `true` 可在**没有凭据时也启用**（适配器等待登录，登录后自动连，无需重启网关）；设 `false` 临时停用 |
 | `LIVIS_STATE_DIR` | `<hermes-home>/livis` | 凭据与状态目录 |
 | `LIVIS_NODE_NAME` | `我的电脑` | 理想 APP 设备列表里的显示名 |
 | `LIVIS_RESULT_FALLBACK_MS` | `5000` | 收口兜底窗口 |
 | `LIVIS_JOB_WATCHDOG_SECONDS` | `300` | 每请求看门狗 |
 | `LIVIS_ALLOWED_NODE_IDS` | 空 | 本地 allowlist；留空=委托中继 |
+| `LIVIS_CREDENTIAL_POLL_SECONDS` | `5` | 未登录时多久检查一次凭据（只读文件，不写盘） |
+| `LIVIS_LOG_RAW_FRAMES` | 未设 | 设 `1` 记录中继原始帧（令牌脱敏），协议考古用 |
 | `LIVIS_CLIENT_NAME` | `openclaw` | 握手 client 标签（改动有被拒风险） |
 | `LIVIS_REFRESH_TOKEN` / `LIVIS_AGENT_ID` / `LIVIS_DEVICE_ID` | 读文件 | 容器化时用 secret 注入（注意 refresh_token 会被轮换） |
 
@@ -172,7 +187,7 @@ interrupt_session_activity · validate_media_delivery_path
 
 ```bash
 pip install -e ".[dev]"
-HERMES_REPO=/path/to/hermes-agent pytest -q     # 97 个测试
+HERMES_REPO=/path/to/hermes-agent pytest -q     # 135 个测试
 ruff check .
 ```
 
@@ -182,13 +197,21 @@ ruff check .
 假中继端到端会真开 WebSocket 服务器与假 IDaaS，覆盖握手字段、先 ack 后处理、
 一 job 一结果、干净关闭必须退避、断线后补发未确认结果。
 
+`tests/test_protocol.py` 末尾固化了 **2026-07-30 与真实理想账号联调时抓到的原始
+帧**（`REAL_CONNECTED` / `REAL_SEND_MESSAGE` / `REAL_ACK_SEND_RESULT`）。生产
+中继的 ack 里**没有** `ref_msg_id`、却带 `{"code":"0"}` 业务状态码 —— 这些是纯
+代码逆向看不出来的，只有对上真实字节才算数。
+
 ## 已知风险
 
 * **理想是否接受非官方客户端** —— 端点、`client_id`、握手的 `client: "openclaw"`
   标签都沿用官方值以降低被拒概率，但服务端是否校验客户端身份**只能真连一次才知道**。
   用 `hermes-livis probe` 单独验证这一点（它把这个未知从凭据 / 绑定 / agent /
   授权等变量里孤立出来，并把 1008、401、干净关闭等失败翻译成可操作的判词）。
-* **协议漂移** —— 私有协议，理想改版需要人工跟。URL 上有 `protocol_version=1`。
+* **协议漂移** —— 私有协议，理想改版需要人工跟。URL 上有 `protocol_version=1`；
+  `LIVIS_LOG_RAW_FRAMES=1` 可以看到中继实际发来的全部字段。
+* **入站没有图片通路** —— 实测对眼镜说「拍个照片儿」也只送来语音转写的文本，
+  帧里没有任何附件字段。有测试盯着，中继哪天开始带媒体字段会立刻失败提醒。
 * **env 注入 refresh_token** —— 服务端轮换后失效，长期运行请用文件存储。
 
 ## 许可

@@ -283,8 +283,20 @@ async def test_pending_result_is_redelivered_after_reconnect(stack) -> None:
     assert relay.connections >= 2
 
 
-async def test_connect_fails_cleanly_without_credentials(
+async def test_connect_waits_instead_of_failing_without_credentials(
     empty_state_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """无凭据时 connect() 返回 True 并挂在等待态。
+
+    「先起网关、后登录」是常见顺序（尤其首次部署）。返回 False 会让网关认为
+    这个平台坏了、不再重试，用户登录完还得重启网关才生效。
+    """
     adapter = _make_adapter()
-    assert await adapter.connect() is False
+    adapter._credential_poll_seconds = 0.05
+    try:
+        assert await adapter.connect() is True
+        await asyncio.sleep(0.2)
+        assert adapter._waiting_for_credentials is True
+        assert adapter._ws is None
+    finally:
+        await adapter.disconnect()

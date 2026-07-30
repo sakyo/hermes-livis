@@ -55,6 +55,10 @@ DEFAULT_RESULT_FALLBACK_MS = 5_000
 # 避免眼镜侧永远等不到回应。
 DEFAULT_JOB_WATCHDOG_SECONDS = 300.0
 
+# 未登录时多久检查一次凭据（秒）。登录可以发生在网关运行期间，适配器挂在等待态
+# 轮询即可，不必要求用户重启网关。只读一个小文件，不写任何东西。
+DEFAULT_CREDENTIAL_POLL_SECONDS = 5.0
+
 # 中继单帧上限，防止异常大帧打爆内存。
 MAX_WIRE_MESSAGE_BYTES = 16 * 1024 * 1024
 

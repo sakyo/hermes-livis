@@ -6,7 +6,9 @@ Hermes 的插件发现规则决定了这里的两步：
 2. 用户插件是**opt-in**的 —— 必须出现在 ``config.yaml`` 的 ``plugins.enabled``
    列表里才会被加载（仓库内置的 ``plugins/platforms/*`` 才自动加载）。
 
-平台名由清单名推导：``livis-platform`` 去掉 ``-platform`` 后缀 ⇒ ``livis``。
+网关侧的平台名与插件目录名无关 —— 用户插件是被直接 import 后调 ``register(ctx)``
+的，平台名来自 ``register_platform(name=...)``（只有仓库内置插件才用「清单名去掉
+``-platform``」推导）。
 
 安装是原子的：先复制到暂存目录，再 ``os.replace`` 换入；换入前把旧目录移到
 备份处，失败则回滚。卸载默认**保留**凭据与投递状态，除非显式 ``--purge``。
@@ -24,8 +26,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-PLUGIN_DIR_NAME = "livis-platform"
+PLUGIN_DIR_NAME = "livis-glass"
 PLUGIN_KEY = PLUGIN_DIR_NAME
+
+# 曾用名。安装时必须把它们清掉：两个目录同时存在会各自 register_platform()
+# 注册同一个平台名，谁后加载谁生效，行为不可预测。
+LEGACY_PLUGIN_DIR_NAMES = ("livis-platform",)
+
+# 网关侧的平台名，与插件目录名**无关**。用户插件（~/.hermes/plugins/）是被
+# 直接 import 后调 register(ctx) 的，平台名来自 register_platform(name=...)；
+# 只有仓库内置插件才会用"清单名去掉 -platform"去推导。保持 livis 不变意味着
+# 环境变量（LIVIS_*）、会话键、已有绑定都不需要迁移。
 PLATFORM_NAME = "livis"
 
 # 已验证过的 Hermes 版本区间。低于下界缺少本插件依赖的基类 API；上界是
@@ -208,7 +219,12 @@ def _dump_yaml(path: Path, data: dict[str, Any]) -> None:
 
 
 def enable_in_config(paths: InstallPaths) -> bool:
-    """把插件 key 加进 ``plugins.enabled``；返回是否发生了修改。"""
+    """把插件 key 加进 ``plugins.enabled``，同时摘掉曾用名。
+
+    返回是否发生了修改。曾用名必须一起清：残留的 key 会让 hermes 去加载一个
+    已经不存在的目录（日志里刷 not found），或者更糟 —— 旧目录还在时两份插件
+    同时注册同一个平台名。
+    """
     data = _load_yaml(paths.config)
     plugins = data.setdefault("plugins", {})
     if not isinstance(plugins, dict):
@@ -216,7 +232,17 @@ def enable_in_config(paths: InstallPaths) -> bool:
     enabled = plugins.setdefault("enabled", [])
     if not isinstance(enabled, list):
         raise InstallError("config.yaml 里的 plugins.enabled 不是列表。")
+
+    stale = [item for item in enabled if item in LEGACY_PLUGIN_DIR_NAMES]
+    if stale:
+        plugins["enabled"] = enabled = [
+            item for item in enabled if item not in LEGACY_PLUGIN_DIR_NAMES
+        ]
+
     if PLUGIN_KEY in enabled:
+        if stale:
+            _dump_yaml(paths.config, data)
+            return True
         return False
     enabled.append(PLUGIN_KEY)
     _dump_yaml(paths.config, data)
@@ -224,14 +250,18 @@ def enable_in_config(paths: InstallPaths) -> bool:
 
 
 def disable_in_config(paths: InstallPaths) -> bool:
+    """从 ``plugins.enabled`` 摘掉当前 key 与所有曾用名。"""
     data = _load_yaml(paths.config)
     plugins = data.get("plugins")
     if not isinstance(plugins, dict):
         return False
     enabled = plugins.get("enabled")
-    if not isinstance(enabled, list) or PLUGIN_KEY not in enabled:
+    if not isinstance(enabled, list):
         return False
-    plugins["enabled"] = [item for item in enabled if item != PLUGIN_KEY]
+    drop = {PLUGIN_KEY, *LEGACY_PLUGIN_DIR_NAMES}
+    if not (drop & set(enabled)):
+        return False
+    plugins["enabled"] = [item for item in enabled if item not in drop]
     _dump_yaml(paths.config, data)
     return True
 
@@ -248,6 +278,21 @@ def is_enabled_in_config(paths: InstallPaths) -> bool:
 # ---------------------------------------------------------------------------
 # 安装 / 卸载
 # ---------------------------------------------------------------------------
+
+def _remove_legacy_installs(paths: InstallPaths) -> list[str]:
+    """删掉曾用名安装的目录，返回被清理的名字。
+
+    不做备份：那是本插件的旧版本，内容在发行包里都有；留着反而会和新目录同时
+    被加载，两份都调 ``register_platform("livis")``，谁生效取决于扫描顺序。
+    """
+    removed: list[str] = []
+    for name in LEGACY_PLUGIN_DIR_NAMES:
+        legacy = paths.plugins_dir / name
+        if legacy.is_dir():
+            shutil.rmtree(legacy)
+            removed.append(name)
+    return removed
+
 
 def _copy_atomic(source: Path, target: Path, backup_root: Path) -> Path | None:
     """原子换入，失败回滚；返回旧版本的备份路径（没有旧版本则 None）。"""
@@ -291,10 +336,12 @@ def install(
     if not (source / "plugin.yaml").exists():
         raise InstallError(f"发行包损坏：{source} 里没有 plugin.yaml")
 
+    removed_legacy = _remove_legacy_installs(paths)
     backup = _copy_atomic(source, paths.target, paths.backup_dir)
     changed = enable_in_config(paths) if enable else False
 
     return {
+        "removed_legacy": removed_legacy,
         "hermes_version": ".".join(map(str, version)) if version else "",
         "version_warning": warning,
         "missing_base_apis": missing,
@@ -316,6 +363,9 @@ def uninstall(*, home: Path | None = None, purge: bool = False) -> dict[str, Any
     removed = False
     if paths.target.exists():
         shutil.rmtree(paths.target)
+        removed = True
+    # 曾用名一并清掉，免得卸载后还留着一份能被加载的旧插件。
+    if _remove_legacy_installs(paths):
         removed = True
     config_changed = disable_in_config(paths)
 

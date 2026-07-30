@@ -203,7 +203,10 @@ async def test_echo_roundtrip_through_the_real_pipeline(
 async def test_echo_reports_connect_failure(
     empty_state_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """没有凭据时干净失败，不是抛异常。"""
+    """echo 是交互式工具：没凭据立刻失败，不要挂在等待态让人以为卡住了。
+
+    （适配器本身是常驻进程，无凭据时会挂在等待态自动等登录 —— 两者刻意不同。）
+    """
     assert await echo_mod.run_echo(duration=1.0) == 1
 
 

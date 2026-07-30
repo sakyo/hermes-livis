@@ -717,3 +717,117 @@ def test_register_declares_no_cron_delivery(
     assert "standalone_sender_fn" not in captured
     assert captured["allow_update_command"] is False
     assert cli_commands == ["livis"]
+
+
+# ---------------------------------------------------------------------------
+# 登录晚于网关启动：connect() 返回 True 并挂在等待态
+# ---------------------------------------------------------------------------
+
+async def test_connect_succeeds_without_credentials_and_waits(
+    empty_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没凭据也要能启动 —— 否则「先起网关、后登录」必须重启网关。"""
+    _P, _M, _O, mod = _imports()
+    adapter = mod.LivisAdapter(_P(enabled=True, extra={}))
+    adapter._credential_poll_seconds = 0.05
+
+    assert await adapter.connect() is True, "缺凭据不该让 connect 失败"
+    await asyncio.sleep(0.2)
+    assert adapter._waiting_for_credentials is True
+    assert adapter._ws is None
+    await adapter.disconnect()
+
+
+async def test_missing_dependency_still_fails_connect(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缺 Python 依赖不会自己恢复，仍然要干脆失败。"""
+    _P, _M, _O, mod = _imports()
+    adapter = mod.LivisAdapter(_P(enabled=True, extra={}))
+
+    real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "websockets":
+            raise ImportError("no websockets")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    assert await adapter.connect() is False
+
+
+async def test_credentials_appearing_later_are_picked_up(
+    empty_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """登录写入凭据后，等待循环自己发现并退出等待态。"""
+    _P, _M, _O, mod = _imports()
+    adapter = mod.LivisAdapter(_P(enabled=True, extra={}))
+    adapter._credential_poll_seconds = 0.05
+    assert adapter._load_identity() is False
+
+    empty_state_dir.mkdir(parents=True, exist_ok=True)
+    (empty_state_dir / "tokens.json").write_text(
+        json.dumps({"relay_refresh_token": "rt-late"}), encoding="utf-8"
+    )
+    (empty_state_dir / "agent.id").write_text("openclaw-late", encoding="utf-8")
+
+    assert adapter._load_identity() is True
+    assert adapter._agent_id == "openclaw-late"
+
+    adapter._running = True
+    adapter._waiting_for_credentials = True
+    assert await adapter._wait_for_credentials() is True
+    assert adapter._waiting_for_credentials is False, "凭据到了要退出等待态"
+    assert adapter._reconnect_attempts == 0, "新凭据不该继承之前的退避计数"
+
+
+async def test_wait_loop_stops_when_adapter_shuts_down(
+    empty_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _P, _M, _O, mod = _imports()
+    adapter = mod.LivisAdapter(_P(enabled=True, extra={}))
+    adapter._credential_poll_seconds = 0.05
+    adapter._running = False
+    assert await adapter._wait_for_credentials() is False
+
+
+def test_enablement_allows_login_after_gateway_start(
+    empty_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """无凭据 + LIVIS_ENABLED=true ⇒ 启用（适配器等待登录）。"""
+    _P, _M, _O, mod = _imports()
+    monkeypatch.setenv("LIVIS_ENABLED", "true")
+    assert mod.check_requirements() is True
+    assert mod.is_connected(None) is True
+    assert mod.env_enablement() is not None
+
+
+def test_enablement_stays_off_for_unconfigured_users(
+    empty_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """无凭据且没显式开 ⇒ 不启用，别打扰从没配过这条渠道的人。"""
+    _P, _M, _O, mod = _imports()
+    monkeypatch.delenv("LIVIS_ENABLED", raising=False)
+    assert mod.check_requirements() is False
+    assert mod.env_enablement() is None
+
+
+def test_explicit_disable_beats_credentials(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _P, _M, _O, mod = _imports()
+    monkeypatch.setenv("LIVIS_ENABLED", "false")
+    assert mod.check_requirements() is False
+    assert mod.env_enablement() is None
+
+
+def test_env_enablement_never_mints_an_agent_id(
+    empty_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """配置加载会在只读场景下被调用，凭空造一个未绑定的 agent_id 只会让人困惑。"""
+    _P, _M, _O, mod = _imports()
+    monkeypatch.setenv("LIVIS_ENABLED", "true")
+    seed = mod.env_enablement()
+    assert seed is not None
+    assert "agent_id" not in seed
+    assert not (empty_state_dir / "agent.id").exists()

@@ -165,6 +165,16 @@ async def run_echo(
     with contextlib.suppress(Exception):
         creds.import_from_openclaw()
 
+    # 适配器作为常驻进程会挂在等待态直到登录；但 echo 是交互式调试工具，
+    # 没凭据就干等着只会让人以为卡住了 —— 这里立刻说清楚。
+    if not creds.is_configured():
+        print("")
+        print("❌ 还没有可用凭据，回声模式无法启动。")
+        print(f"   凭据目录：{creds.directory}")
+        print("   先执行：hermes-livis login   （或 hermes-livis import-openclaw）")
+        print("")
+        return 1
+
     print("")
     print("理想眼镜 · 回声联调模式（绕过 Hermes 生命周期）")
     print("─" * 46)
