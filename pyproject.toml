@@ -1,0 +1,81 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hermes-livis"
+version = "1.0.0"
+description = "理想眼镜 (Li Auto Livis glasses) platform adapter for Hermes Agent"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "hermes-livis contributors" }]
+keywords = ["hermes", "hermes-agent", "livis", "lixiang", "smart-glasses", "websocket"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications :: Chat",
+]
+
+# 运行期依赖刻意只有这三个，而且都是 Hermes 本身已经带的：
+#   websockets —— 中继长连接
+#   aiohttp    —— IDaaS 令牌刷新与文件上传（ClientSession 默认 trust_env=False）
+#   pyyaml     —— 安装器编辑 config.yaml
+# 插件内部**惰性**导入前两个，缺包时插件仍可被发现、hermes config 也能描述它。
+dependencies = [
+  "websockets>=12.0",
+  "aiohttp>=3.9",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.5",
+]
+
+[project.scripts]
+hermes-livis = "hermes_livis.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yangzhongwei/hermes-livis"
+Issues = "https://github.com/yangzhongwei/hermes-livis/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hermes_livis"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/hermes_livis/plugin/plugin.yaml" = "hermes_livis/plugin/plugin.yaml"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/docs",
+  "/README.md",
+  "/CHANGELOG.md",
+  "/LICENSE",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]

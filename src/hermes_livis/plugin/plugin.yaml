@@ -1,0 +1,85 @@
+name: livis-platform
+label: 理想眼镜 (Livis)
+kind: platform
+version: 1.0.0
+description: >
+  理想眼镜 (Li Auto Livis glasses) 的 Hermes 平台适配器。以持久外拨的
+  WebSocket 客户端连接理想 livis-pc-kit 中继，收眼镜下发的语音指令交给
+  Hermes agent 处理，再把答案回传给眼镜朗读。链路中不再需要 openclaw。
+
+  凭据来自理想 IDaaS 的 OAuth2 设备码登录（`hermes-livis login`），也可从
+  已安装的 openclaw 官方插件一键导入（`hermes-livis import-openclaw`，
+  agent_id 一致，眼镜无需重新绑定）。
+
+  独立实现，与理想汽车无从属或背书关系。
+author: hermes-livis contributors
+# 凭据是文件而不是环境变量（refresh_token 会被服务端轮换，必须可写回），
+# 因此 requires_env 为空 —— 配置入口是 `hermes-livis login`。
+optional_env:
+  - name: LIVIS_ENABLED
+    description: "设为 false / 0 可在不删凭据的情况下临时关闭本渠道"
+    prompt: "启用理想眼镜渠道？(true/false)"
+    password: false
+  - name: LIVIS_STATE_DIR
+    description: "凭据与投递状态目录（默认 <hermes-home>/livis）"
+    prompt: "Livis 状态目录（留空用默认）"
+    password: false
+  - name: LIVIS_NODE_NAME
+    description: "在理想 APP 设备列表里显示的名字（默认 我的电脑）"
+    prompt: "节点显示名"
+    password: false
+  - name: LIVIS_ALLOWED_NODE_IDS
+    description: >-
+      可选的本地 allowlist，值填眼镜的 from_node_id（逗号分隔）。留空表示把
+      授权委托给理想中继（它已用 OAuth token 认证连接，并只路由已绑定到本
+      agent_id 的眼镜）。一旦设置，就改走 Hermes 标准 allowlist 判定。
+    prompt: "允许的 node id（逗号分隔，留空=委托中继）"
+    password: false
+  - name: LIVIS_ALLOW_ALL_USERS
+    description: "设为 true 时放行所有发送方（配合 LIVIS_ALLOWED_NODE_IDS 使用）"
+    prompt: "允许所有发送方？(true/false)"
+    password: false
+  - name: LIVIS_RESULT_FALLBACK_MS
+    description: >-
+      收口兜底窗口（毫秒，默认 5000）。正常由 on_processing_complete 钩子精确
+      收口；这个计时器只在钩子未触发时兜底。
+    prompt: "兜底收口窗口毫秒数（默认 5000）"
+    password: false
+  - name: LIVIS_JOB_WATCHDOG_SECONDS
+    description: >-
+      每个请求的看门狗秒数（默认 300）。派发后这么久还没有任何产出就回一条
+      兜底提示，避免眼镜端永远等不到回应。
+    prompt: "请求看门狗秒数（默认 300）"
+    password: false
+  - name: LIVIS_REFRESH_TOKEN
+    description: >-
+      直接注入 refresh_token（容器化用 secret 时方便）。注意服务端会轮换，
+      注入值不会被更新，长期运行建议用文件存储。
+    prompt: "Livis refresh token（留空则用 tokens.json）"
+    password: true
+  - name: LIVIS_AGENT_ID
+    description: "覆盖 agent.id —— 必须与理想 APP 里绑定眼镜时输入的值一致"
+    prompt: "Livis Agent ID（留空则用 agent.id 文件）"
+    password: false
+  - name: LIVIS_DEVICE_ID
+    description: "覆盖 device.id（默认 pc_<sha256(机器码)>；从 openclaw 迁移时自动沿用旧值）"
+    prompt: "Livis Device ID（留空自动生成）"
+    password: false
+  - name: LIVIS_CLIENT_NAME
+    description: >-
+      握手里的 client 标签，默认 openclaw（中继期望的 PC 节点标识）。改成别的
+      值有被服务端拒绝的风险，除非你确认理想不校验该字段。
+    prompt: "client 标签（默认 openclaw）"
+    password: false
+  - name: LIVIS_WS_URL
+    description: "覆盖中继 WebSocket 地址"
+    prompt: "中继 WS 地址"
+    password: false
+  - name: LIVIS_HTTP_URL
+    description: "覆盖中继 HTTP 地址（文件上传）"
+    prompt: "中继 HTTP 地址"
+    password: false
+  - name: LIVIS_IDAAS_ENDPOINT
+    description: "覆盖理想 IDaaS 地址"
+    prompt: "IDaaS 地址"
+    password: false

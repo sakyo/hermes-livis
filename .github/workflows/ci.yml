@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # 适配器与端到端测试需要能 import hermes 的 gateway.*；CI 里没有 hermes 时
+    # conftest 会把这部分自动 skip，协议 / store / safeio / installer 照常跑。
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest -q
+
+      - name: Payload self-containment
+        # 负载会被整目录复制到 ~/.hermes/plugins/，不能依赖外层包可导入
+        run: |
+          ! grep -rn "from hermes_livis\|import hermes_livis" src/hermes_livis/plugin/
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build distributions
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+      - name: Wheel ships the plugin manifest
+        run: |
+          python - <<'PY'
+          import zipfile, glob, sys
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          required = [
+              "hermes_livis/plugin/plugin.yaml",
+              "hermes_livis/plugin/adapter.py",
+              "hermes_livis/plugin/protocol.py",
+              "hermes_livis/plugin/store.py",
+          ]
+          missing = [n for n in required if n not in names]
+          if missing:
+              sys.exit(f"wheel 缺少: {missing}")
+          print("wheel 内容完整")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
